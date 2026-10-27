@@ -21,6 +21,7 @@ import requests
 INFO_URL = "https://drive-m.quark.cn/1/clouddrive/capacity/growth/info"
 SIGN_URL = "https://drive-m.quark.cn/1/clouddrive/capacity/growth/sign"
 REQUIRED_PARAMS = ("kps", "sign", "vcode")
+SERVER_CHAN_API = "https://sctapi.ftqq.com/{send_key}.send"
 
 
 class ConfigError(ValueError):
@@ -31,10 +32,33 @@ class QuarkAPIError(RuntimeError):
     """Raised when the Quark API cannot complete a sign-in operation."""
 
 
-def send(title: str, message: str) -> None:
-    """Print a notification-compatible summary."""
+def push_server_chan(title: str, message: str, send_key: str | None = None) -> bool:
+    """Send a Server Chan notification when SENDKEY is configured."""
+
+    send_key = send_key if send_key is not None else os.getenv("SENDKEY")
+    if not send_key or not send_key.strip():
+        return False
+
+    try:
+        response = requests.post(
+            SERVER_CHAN_API.format(send_key=send_key.strip()),
+            data={"title": title, "desp": message.replace("\n", "\n\n")},
+            timeout=20,
+        )
+        response.raise_for_status()
+        print("✅ Server酱推送成功")
+        return True
+    except requests.RequestException as exc:
+        print(f"⚠️ Server酱推送失败：{exc}")
+        return False
+
+
+def send(title: str, message: str, push: bool = True) -> None:
+    """Print a notification-compatible summary and optionally push it."""
 
     print(f"{title}:\n{message}")
+    if push:
+        push_server_chan(title, message)
 
 
 def split_account_entries(raw_value: str | None) -> list[str]:
@@ -270,7 +294,7 @@ def main(
             results.append(f"{heading}\n❌ 未知错误：{type(exc).__name__}")
 
     summary = "\n\n".join(results)
-    send("夸克自动签到", summary)
+    send("夸克自动签到", summary, push=failures == 0)
     print(
         f"\n----------执行完毕：成功 {len(entries) - failures}，失败 {failures}----------"
     )

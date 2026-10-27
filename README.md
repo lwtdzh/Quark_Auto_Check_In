@@ -110,6 +110,13 @@ user=张三; kps=abcdefg; sign=hijklmn; vcode=111111111;
 - Name：`COOKIE_QUARK`
 - Secret：粘贴上一步整理的账号配置
 
+如果需要签到成功后通过 Server 酱推送通知，再添加一个可选 Secret：
+
+- Name：`SENDKEY`
+- Secret：Server 酱的 SendKey，可在 [Server 酱官网](https://sct.ftqq.com/) 获取
+
+没有配置 `SENDKEY` 时，签到流程只会在 Actions 日志中打印结果，不会发送推送；配置后，仅当本次所有账号都签到成功或已签到时发送成功通知。
+
 多账号可以用换行分隔：
 
 ```text

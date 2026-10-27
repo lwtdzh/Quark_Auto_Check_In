@@ -66,6 +66,7 @@ jobs:
         if: steps.cache-success.outputs.cache-hit != 'true'
         env:
           COOKIE_QUARK: ${{ secrets.COOKIE_QUARK }}
+          SENDKEY: ${{ secrets.SENDKEY }}
         run: python checkIn_Quark.py
 
       - name: 生成今日成功标记

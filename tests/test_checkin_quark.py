@@ -1,6 +1,7 @@
 import io
 import unittest
 from contextlib import redirect_stdout
+from unittest.mock import patch
 
 from checkIn_Quark import (
     ConfigError,
@@ -9,6 +10,7 @@ from checkIn_Quark import (
     extract_params,
     main,
     parse_account,
+    push_server_chan,
     split_account_entries,
 )
 
@@ -170,6 +172,61 @@ class MainTests(unittest.TestCase):
                 "user=账号;kps=1;sign=1;vcode=1;", quark_factory=StubQuark
             )
         self.assertEqual(exit_code, 0)
+
+    def test_success_pushes_server_chan_when_sendkey_is_configured(self):
+        class StubQuark:
+            def __init__(self, account):
+                self.account = account
+
+            def do_sign(self):
+                return "✅ 签到成功"
+
+        with (
+            patch.dict("os.environ", {"SENDKEY": "test-sendkey"}),
+            patch("checkIn_Quark.requests.post", return_value=FakeResponse({})) as post,
+            redirect_stdout(io.StringIO()),
+        ):
+            exit_code = main(
+                "user=账号;kps=1;sign=1;vcode=1;", quark_factory=StubQuark
+            )
+
+        self.assertEqual(exit_code, 0)
+        post.assert_called_once()
+        args, kwargs = post.call_args
+        self.assertEqual(
+            args[0], "https://sctapi.ftqq.com/test-sendkey.send"
+        )
+        self.assertEqual(kwargs["data"]["title"], "夸克自动签到")
+
+    def test_missing_sendkey_skips_server_chan_push(self):
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch("checkIn_Quark.requests.post") as post,
+        ):
+            pushed = push_server_chan("标题", "内容")
+
+        self.assertFalse(pushed)
+        post.assert_not_called()
+
+    def test_failed_run_does_not_push_success_notification(self):
+        class StubQuark:
+            def __init__(self, account):
+                self.account = account
+
+            def do_sign(self):
+                raise QuarkAPIError("凭证失效")
+
+        with (
+            patch.dict("os.environ", {"SENDKEY": "test-sendkey"}),
+            patch("checkIn_Quark.requests.post") as post,
+            redirect_stdout(io.StringIO()),
+        ):
+            exit_code = main(
+                "user=账号;kps=1;sign=1;vcode=1;", quark_factory=StubQuark
+            )
+
+        self.assertEqual(exit_code, 1)
+        post.assert_not_called()
 
     def test_missing_environment_returns_configuration_error(self):
         with redirect_stdout(io.StringIO()):
