@@ -101,8 +101,10 @@ class ClientTests(unittest.TestCase):
                 )
             ]
         )
-        result = Quark(self.account, session=session).do_sign()
+        quark = Quark(self.account, session=session)
+        result = quark.do_sign()
         self.assertIn("今日已签到", result)
+        self.assertFalse(quark.checked_in_by_this_run)
         self.assertEqual(len(session.calls), 1)
 
     def test_unsigned_account_posts_sign_request(self):
@@ -125,8 +127,10 @@ class ClientTests(unittest.TestCase):
                 FakeResponse({"data": {"sign_daily_reward": 1024}}),
             ]
         )
-        result = Quark(self.account, session=session).do_sign()
+        quark = Quark(self.account, session=session)
+        result = quark.do_sign()
         self.assertIn("签到成功", result)
+        self.assertTrue(quark.checked_in_by_this_run)
         self.assertEqual([call[0] for call in session.calls], ["GET", "POST"])
 
     def test_api_error_is_not_treated_as_success(self):
@@ -163,6 +167,7 @@ class MainTests(unittest.TestCase):
         class StubQuark:
             def __init__(self, account):
                 self.account = account
+                self.checked_in_by_this_run = True
 
             def do_sign(self):
                 return "✅ 签到成功"
@@ -177,6 +182,7 @@ class MainTests(unittest.TestCase):
         class StubQuark:
             def __init__(self, account):
                 self.account = account
+                self.checked_in_by_this_run = True
 
             def do_sign(self):
                 return "✅ 签到成功"
@@ -198,6 +204,59 @@ class MainTests(unittest.TestCase):
         )
         self.assertEqual(kwargs["data"]["title"], "夸克自动签到")
 
+    def test_all_accounts_already_checked_in_skips_server_chan_push(self):
+        class StubQuark:
+            def __init__(self, account):
+                self.account = account
+                self.checked_in_by_this_run = False
+
+            def do_sign(self):
+                return f"{self.account['user']}\n✅ 今日已签到"
+
+        raw = (
+            "user=账号一;kps=1;sign=1;vcode=1;\n"
+            "user=账号二;kps=2;sign=2;vcode=2;"
+        )
+        with (
+            patch.dict("os.environ", {"SERVER_CHAN_SEND_KEY": "test-sendkey"}),
+            patch("checkIn_Quark.requests.post") as post,
+            redirect_stdout(io.StringIO()),
+        ):
+            exit_code = main(raw, quark_factory=StubQuark)
+
+        self.assertEqual(exit_code, 0)
+        post.assert_not_called()
+
+    def test_mixed_account_results_push_one_summary(self):
+        class StubQuark:
+            def __init__(self, account):
+                self.account = account
+                self.checked_in_by_this_run = account["user"] == "账号二"
+
+            def do_sign(self):
+                if self.checked_in_by_this_run:
+                    return f"{self.account['user']}\n✅ 签到成功"
+                return f"{self.account['user']}\n✅ 今日已签到"
+
+        raw = (
+            "user=账号一;kps=1;sign=1;vcode=1;\n"
+            "user=账号二;kps=2;sign=2;vcode=2;"
+        )
+        with (
+            patch.dict("os.environ", {"SERVER_CHAN_SEND_KEY": "test-sendkey"}),
+            patch("checkIn_Quark.requests.post", return_value=FakeResponse({})) as post,
+            redirect_stdout(io.StringIO()),
+        ):
+            exit_code = main(raw, quark_factory=StubQuark)
+
+        self.assertEqual(exit_code, 0)
+        post.assert_called_once()
+        message = post.call_args.kwargs["data"]["desp"]
+        self.assertIn("账号一", message)
+        self.assertIn("账号二", message)
+        self.assertIn("今日已签到", message)
+        self.assertIn("签到成功", message)
+
     def test_missing_server_chan_send_key_skips_server_chan_push(self):
         with (
             patch.dict("os.environ", {}, clear=True),
@@ -208,25 +267,34 @@ class MainTests(unittest.TestCase):
         self.assertFalse(pushed)
         post.assert_not_called()
 
-    def test_failed_run_does_not_push_success_notification(self):
+    def test_failed_run_pushes_one_summary(self):
         class StubQuark:
             def __init__(self, account):
                 self.account = account
+                self.checked_in_by_this_run = False
 
             def do_sign(self):
-                raise QuarkAPIError("凭证失效")
+                if self.account["user"] == "坏账号":
+                    raise QuarkAPIError("凭证失效")
+                return f"{self.account['user']}\n✅ 今日已签到"
 
+        raw = (
+            "user=坏账号;kps=1;sign=1;vcode=1;\n"
+            "user=好账号;kps=2;sign=2;vcode=2;"
+        )
         with (
             patch.dict("os.environ", {"SERVER_CHAN_SEND_KEY": "test-sendkey"}),
-            patch("checkIn_Quark.requests.post") as post,
+            patch("checkIn_Quark.requests.post", return_value=FakeResponse({})) as post,
             redirect_stdout(io.StringIO()),
         ):
-            exit_code = main(
-                "user=账号;kps=1;sign=1;vcode=1;", quark_factory=StubQuark
-            )
+            exit_code = main(raw, quark_factory=StubQuark)
 
         self.assertEqual(exit_code, 1)
-        post.assert_not_called()
+        post.assert_called_once()
+        message = post.call_args.kwargs["data"]["desp"]
+        self.assertIn("坏账号", message)
+        self.assertIn("凭证失效", message)
+        self.assertIn("好账号", message)
 
     def test_missing_environment_returns_configuration_error(self):
         with redirect_stdout(io.StringIO()):

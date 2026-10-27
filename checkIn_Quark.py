@@ -148,6 +148,7 @@ class Quark:
         self.account = account
         self.session = session or requests.Session()
         self.timeout = timeout
+        self.checked_in_by_this_run = False
 
     @staticmethod
     def convert_bytes(value: int | float) -> str:
@@ -249,9 +250,11 @@ class Quark:
                 if not isinstance(verified, dict) or not verified.get("sign_daily"):
                     raise QuarkAPIError("未确认签到成功，等待定时补签") from exc
                 reward = verified.get("sign_daily_reward", 0)
+                self.checked_in_by_this_run = True
                 lines.append("✅ 复查确认今日已签到")
                 return "\n".join(lines)
             next_progress = progress + 1 if isinstance(progress, int) else "?"
+            self.checked_in_by_this_run = True
             lines.append(
                 f"✅ 签到成功 +{self.convert_bytes(reward)}，"
                 f"连签进度（{next_progress}/{target}）"
@@ -280,22 +283,34 @@ def main(
     print(f"✅ 检测到共 {len(entries)} 个夸克账号\n")
     results: list[str] = []
     failures = 0
+    checked_in_by_this_run = 0
 
     for index, entry in enumerate(entries, start=1):
         heading = f"🙍🏻‍♂️ 第 {index} 个账号"
+        account_name = ""
         try:
             account = parse_account(entry, index)
-            result = quark_factory(account).do_sign()
+            account_name = account["user"]
+            quark = quark_factory(account)
+            result = quark.do_sign()
+            if getattr(quark, "checked_in_by_this_run", False):
+                checked_in_by_this_run += 1
             results.append(f"{heading}\n{result}")
         except (ConfigError, QuarkAPIError, KeyError, TypeError, ValueError) as exc:
             failures += 1
-            results.append(f"{heading}\n❌ {exc}")
+            failure_heading = f"{heading}（{account_name}）" if account_name else heading
+            results.append(f"{failure_heading}\n❌ {exc}")
         except Exception as exc:  # Keep later accounts running on unexpected errors.
             failures += 1
-            results.append(f"{heading}\n❌ 未知错误：{type(exc).__name__}")
+            failure_heading = f"{heading}（{account_name}）" if account_name else heading
+            results.append(f"{failure_heading}\n❌ 未知错误：{type(exc).__name__}")
 
     summary = "\n\n".join(results)
-    send("夸克自动签到", summary, push=failures == 0)
+    send(
+        "夸克自动签到",
+        summary,
+        push=failures > 0 or checked_in_by_this_run > 0,
+    )
     print(
         f"\n----------执行完毕：成功 {len(entries) - failures}，失败 {failures}----------"
     )
