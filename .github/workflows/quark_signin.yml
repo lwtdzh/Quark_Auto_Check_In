@@ -2,8 +2,8 @@ name: 夸克网盘每日签到
 
 on:
   schedule:
-    - cron: "0 1 * * *" # 北京时间 09:00
-    - cron: "0 5 * * *" # 北京时间 13:00，失败兜底
+    - cron: "22 1 * * *" # 北京时间 09:22
+    - cron: "21 5 * * *" # 北京时间 13:21，失败兜底
   workflow_dispatch:
 
 permissions:
