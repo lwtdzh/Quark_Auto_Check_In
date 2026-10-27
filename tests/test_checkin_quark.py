@@ -1,6 +1,9 @@
 import io
+import os
+import tempfile
 import unittest
 from contextlib import redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
 
 from checkIn_Quark import (
@@ -8,6 +11,7 @@ from checkIn_Quark import (
     Quark,
     QuarkAPIError,
     extract_params,
+    load_env_file,
     main,
     parse_account,
     push_server_chan,
@@ -75,6 +79,37 @@ class ParsingTests(unittest.TestCase):
     def test_parse_account_reports_missing_parameters(self):
         with self.assertRaisesRegex(ConfigError, "sign, vcode"):
             parse_account("user=张三; kps=k;", 1)
+
+
+class EnvFileTests(unittest.TestCase):
+    def test_load_env_file_reads_simple_quoted_values(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text(
+                "\n".join(
+                    [
+                        "# comment",
+                        "COOKIE_QUARK='user=账号; url=https://example.test/?a=1&b=2'",
+                        'SERVER_CHAN_SEND_KEY=\"server-key\"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {}, clear=True):
+                load_env_file(env_path)
+                self.assertEqual(
+                    os.environ["COOKIE_QUARK"],
+                    "user=账号; url=https://example.test/?a=1&b=2",
+                )
+                self.assertEqual(os.environ["SERVER_CHAN_SEND_KEY"], "server-key")
+
+    def test_load_env_file_does_not_override_existing_environment(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text("COOKIE_QUARK=file-value", encoding="utf-8")
+            with patch.dict("os.environ", {"COOKIE_QUARK": "existing-value"}):
+                load_env_file(env_path)
+                self.assertEqual(os.environ["COOKIE_QUARK"], "existing-value")
 
 
 class ClientTests(unittest.TestCase):

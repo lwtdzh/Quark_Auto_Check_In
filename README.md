@@ -149,6 +149,13 @@ user=账号一; url=https://...; && user=账号二; url=https://...;
 - `COOKIE_QUARK`：账号配置，格式与 GitHub Actions Secret 相同。
 - `SERVER_CHAN_SEND_KEY`：可选，Server 酱 SendKey。
 
+也可以在项目目录创建 `.env`，脚本会自动读取，且不会覆盖青龙已经注入的同名环境变量：
+
+```bash
+COOKIE_QUARK='user=账号一; url=https://...;'
+SERVER_CHAN_SEND_KEY='SCT...'
+```
+
 青龙定时任务：
 
 ```text

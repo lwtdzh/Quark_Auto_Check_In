@@ -15,6 +15,7 @@ import random
 import re
 import sys
 import time
+from pathlib import Path
 from typing import Callable
 from urllib.parse import unquote, urlparse
 
@@ -63,6 +64,29 @@ def send(title: str, message: str, push: bool = True) -> None:
     print(f"{title}:\n{message}")
     if push:
         push_server_chan(title, message)
+
+
+def load_env_file(path: str | Path = ".env") -> None:
+    """Load simple KEY=VALUE pairs without overriding existing environment."""
+
+    env_path = Path(path)
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
 
 
 def split_account_entries(raw_value: str | None) -> list[str]:
@@ -273,6 +297,7 @@ def main(
     """Run every configured account and return a process-compatible exit code."""
 
     print("----------夸克网盘开始签到----------")
+    load_env_file(Path(__file__).with_name(".env"))
     if cookie_value is None:
         cookie_value = os.getenv("COOKIE_QUARK")
     quark_factory = quark_factory or Quark
