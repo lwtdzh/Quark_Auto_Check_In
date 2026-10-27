@@ -173,7 +173,7 @@ class MainTests(unittest.TestCase):
             )
         self.assertEqual(exit_code, 0)
 
-    def test_success_pushes_server_chan_when_sendkey_is_configured(self):
+    def test_success_pushes_server_chan_when_server_chan_send_key_is_configured(self):
         class StubQuark:
             def __init__(self, account):
                 self.account = account
@@ -182,7 +182,7 @@ class MainTests(unittest.TestCase):
                 return "✅ 签到成功"
 
         with (
-            patch.dict("os.environ", {"SENDKEY": "test-sendkey"}),
+            patch.dict("os.environ", {"SERVER_CHAN_SEND_KEY": "test-sendkey"}),
             patch("checkIn_Quark.requests.post", return_value=FakeResponse({})) as post,
             redirect_stdout(io.StringIO()),
         ):
@@ -198,7 +198,7 @@ class MainTests(unittest.TestCase):
         )
         self.assertEqual(kwargs["data"]["title"], "夸克自动签到")
 
-    def test_missing_sendkey_skips_server_chan_push(self):
+    def test_missing_server_chan_send_key_skips_server_chan_push(self):
         with (
             patch.dict("os.environ", {}, clear=True),
             patch("checkIn_Quark.requests.post") as post,
@@ -217,7 +217,7 @@ class MainTests(unittest.TestCase):
                 raise QuarkAPIError("凭证失效")
 
         with (
-            patch.dict("os.environ", {"SENDKEY": "test-sendkey"}),
+            patch.dict("os.environ", {"SERVER_CHAN_SEND_KEY": "test-sendkey"}),
             patch("checkIn_Quark.requests.post") as post,
             redirect_stdout(io.StringIO()),
         ):

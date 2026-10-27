@@ -22,6 +22,7 @@ INFO_URL = "https://drive-m.quark.cn/1/clouddrive/capacity/growth/info"
 SIGN_URL = "https://drive-m.quark.cn/1/clouddrive/capacity/growth/sign"
 REQUIRED_PARAMS = ("kps", "sign", "vcode")
 SERVER_CHAN_API = "https://sctapi.ftqq.com/{send_key}.send"
+SERVER_CHAN_SEND_KEY_ENV = "SERVER_CHAN_SEND_KEY"
 
 
 class ConfigError(ValueError):
@@ -33,9 +34,9 @@ class QuarkAPIError(RuntimeError):
 
 
 def push_server_chan(title: str, message: str, send_key: str | None = None) -> bool:
-    """Send a Server Chan notification when SENDKEY is configured."""
+    """Send a Server Chan notification when its GitHub secret is configured."""
 
-    send_key = send_key if send_key is not None else os.getenv("SENDKEY")
+    send_key = send_key if send_key is not None else os.getenv(SERVER_CHAN_SEND_KEY_ENV)
     if not send_key or not send_key.strip():
         return False
 
