@@ -134,6 +134,35 @@ user=账号一; url=https://...; && user=账号二; url=https://...;
 
 进入 **Actions → 夸克网盘每日签到 → Run workflow**。第一次运行会真实请求签到接口；当天全部账号已经成功后，再次运行将显示“今日已全部签到成功，跳过重复执行”。
 
+## 🐉 青龙面板部署
+
+本项目也可以作为青龙面板的 Python 定时任务运行。
+
+推荐目录：
+
+```text
+/ql/data/scripts/Quark_Auto_Check_In
+```
+
+青龙环境变量：
+
+- `COOKIE_QUARK`：账号配置，格式与 GitHub Actions Secret 相同。
+- `SERVER_CHAN_SEND_KEY`：可选，Server 酱 SendKey。
+
+青龙定时任务：
+
+```text
+22 9 * * * cd /ql/data/scripts/Quark_Auto_Check_In && python3 checkIn_Quark.py
+```
+
+如果青龙容器里没有 `requests`，先安装依赖：
+
+```bash
+pip3 install -r /ql/data/scripts/Quark_Auto_Check_In/requirements.txt
+```
+
+青龙部署只需要每天执行一次，不配置下午兜底。Server 酱通知规则与 GitHub Actions 一致：每次脚本执行最多发送一条汇总通知；如果所有账号在执行前已经是“今日已签到”，则不发送通知。
+
 ## 🔁 执行与重试逻辑
 
 1. 工作流按北京时间生成当天的缓存键。

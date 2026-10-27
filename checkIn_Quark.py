@@ -1,3 +1,6 @@
+# cron: 22 9 * * *
+# new Env('夸克网盘自动签到')
+
 """Quark cloud-drive daily sign-in.
 
 The script accepts one or more account entries from ``COOKIE_QUARK``. Accounts
