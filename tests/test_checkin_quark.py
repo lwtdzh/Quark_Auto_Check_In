@@ -6,6 +6,8 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+import requests
+
 from checkIn_Quark import (
     ConfigError,
     Quark,
@@ -15,6 +17,7 @@ from checkIn_Quark import (
     main,
     parse_account,
     push_server_chan,
+    send,
     split_account_entries,
 )
 
@@ -175,6 +178,12 @@ class ClientTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
+    def setUp(self):
+        # Tests must never use real notification credentials or Actions outputs.
+        env = patch.dict("os.environ", {}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+
     def test_multi_account_continues_after_one_failure_and_returns_nonzero(self):
         seen = []
 
@@ -224,7 +233,7 @@ class MainTests(unittest.TestCase):
 
         with (
             patch.dict("os.environ", {"SERVER_CHAN_SEND_KEY": "test-sendkey"}),
-            patch("checkIn_Quark.requests.post", return_value=FakeResponse({})) as post,
+            patch("checkIn_Quark.requests.post", return_value=FakeResponse({"code": 0})) as post,
             redirect_stdout(io.StringIO()),
         ):
             exit_code = main(
@@ -279,7 +288,7 @@ class MainTests(unittest.TestCase):
         )
         with (
             patch.dict("os.environ", {"SERVER_CHAN_SEND_KEY": "test-sendkey"}),
-            patch("checkIn_Quark.requests.post", return_value=FakeResponse({})) as post,
+            patch("checkIn_Quark.requests.post", return_value=FakeResponse({"code": 0})) as post,
             redirect_stdout(io.StringIO()),
         ):
             exit_code = main(raw, quark_factory=StubQuark)
@@ -319,7 +328,7 @@ class MainTests(unittest.TestCase):
         )
         with (
             patch.dict("os.environ", {"SERVER_CHAN_SEND_KEY": "test-sendkey"}),
-            patch("checkIn_Quark.requests.post", return_value=FakeResponse({})) as post,
+            patch("checkIn_Quark.requests.post", return_value=FakeResponse({"code": 0})) as post,
             redirect_stdout(io.StringIO()),
         ):
             exit_code = main(raw, quark_factory=StubQuark)
@@ -335,6 +344,136 @@ class MainTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             exit_code = main("")
         self.assertEqual(exit_code, 2)
+
+
+class ActionsSummaryTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.summary = Path(temp.name) / "step-summary.md"
+        self.cached_summary = Path(temp.name) / "cache" / "summary.md"
+        env = patch.dict(
+            "os.environ",
+            {
+                "GITHUB_STEP_SUMMARY": str(self.summary),
+                "QUARK_SUMMARY_FILE": str(self.cached_summary),
+                "SERVER_CHAN_SEND_KEY": "test-sendkey",
+            },
+            clear=True,
+        )
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_success_summary_matches_notification_and_cache_omits_push_status(self):
+        class StubQuark:
+            checked_in_by_this_run = True
+
+            def __init__(self, account):
+                self.account = account
+
+            def do_sign(self):
+                return f"{self.account['user']}\n✅ 签到成功 +20.00 MB"
+
+        raw = "user=账号一;kps=1;sign=1;vcode=1;\nuser=账号二;kps=2;sign=2;vcode=2;"
+        output = io.StringIO()
+        with (
+            patch("checkIn_Quark.requests.post", return_value=FakeResponse({"code": 0})) as post,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(main(raw, quark_factory=StubQuark), 0)
+
+        post.assert_called_once()
+        report = self.summary.read_text(encoding="utf-8")
+        account_message = report.split("```text\n", 1)[1].split("\n```", 1)[0]
+        self.assertEqual(post.call_args.kwargs["data"]["desp"], account_message.replace("\n", "\n\n"))
+        self.assertIn("账号一", report)
+        self.assertIn("账号二", report)
+        self.assertIn("Server 酱：本次已发送，发送成功。", report)
+        self.assertIn("Server 酱：本次已发送，发送成功。", output.getvalue())
+        cached = self.cached_summary.read_text(encoding="utf-8")
+        self.assertIn(account_message, cached)
+        self.assertNotIn("Server 酱：", cached)
+
+    def test_all_already_signed_reports_skip_without_sending(self):
+        with patch("checkIn_Quark.requests.post") as post, redirect_stdout(io.StringIO()):
+            send("夸克自动签到", "账号一：今日已签到\n账号二：今日已签到", push=False)
+        post.assert_not_called()
+        self.assertIn(
+            "Server 酱：本次未发送（所有账号在执行前已签到）。",
+            self.summary.read_text(encoding="utf-8"),
+        )
+
+    def test_missing_key_reports_skip_without_sending(self):
+        os.environ.pop("SERVER_CHAN_SEND_KEY")
+        with patch("checkIn_Quark.requests.post") as post, redirect_stdout(io.StringIO()):
+            send("夸克自动签到", "✅ 签到成功")
+        post.assert_not_called()
+        self.assertIn(
+            "本次未发送（未配置 SERVER_CHAN_SEND_KEY）",
+            self.summary.read_text(encoding="utf-8"),
+        )
+
+    def test_failed_account_summary_includes_all_accounts_and_push_status(self):
+        class StubQuark:
+            checked_in_by_this_run = False
+
+            def __init__(self, account):
+                self.account = account
+
+            def do_sign(self):
+                if self.account["user"] == "坏账号":
+                    raise QuarkAPIError("凭证失效")
+                return f"{self.account['user']}\n✅ 今日已签到"
+
+        raw = "user=坏账号;kps=1;sign=1;vcode=1;\nuser=好账号;kps=2;sign=2;vcode=2;"
+        with (
+            patch("checkIn_Quark.requests.post", return_value=FakeResponse({"code": 0})) as post,
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(main(raw, quark_factory=StubQuark), 1)
+        post.assert_called_once()
+        report = self.summary.read_text(encoding="utf-8")
+        self.assertIn("坏账号", report)
+        self.assertIn("凭证失效", report)
+        self.assertIn("好账号", report)
+        self.assertIn("本次已发送，发送成功", report)
+
+    def test_notification_failures_are_reported_without_failing_signin(self):
+        class StubQuark:
+            checked_in_by_this_run = True
+
+            def __init__(self, account):
+                pass
+
+            def do_sign(self):
+                return "✅ 签到成功"
+
+        cases = [
+            {"return_value": FakeResponse({"code": 40001})},
+            {"return_value": FakeResponse({})},
+            {"return_value": FakeResponse([])},
+            {"side_effect": requests.ConnectionError("https://sctapi.ftqq.com/test-sendkey.send")},
+            {"side_effect": ValueError("invalid json")},
+        ]
+        for response in cases:
+            with self.subTest(response=response):
+                self.summary.write_text("", encoding="utf-8")
+                output = io.StringIO()
+                with patch("checkIn_Quark.requests.post", **response), redirect_stdout(output):
+                    self.assertEqual(
+                        main("user=账号;kps=1;sign=1;vcode=1;", quark_factory=StubQuark),
+                        0,
+                    )
+                self.assertIn("本次已尝试发送，发送失败", self.summary.read_text(encoding="utf-8"))
+                self.assertNotIn("test-sendkey", output.getvalue())
+
+    def test_missing_accounts_still_produce_summary_without_sending(self):
+        with patch("checkIn_Quark.requests.post") as post, redirect_stdout(io.StringIO()):
+            self.assertEqual(main(""), 2)
+        post.assert_not_called()
+        report = self.summary.read_text(encoding="utf-8")
+        self.assertIn("未配置 COOKIE_QUARK", report)
+        self.assertIn("本次未发送（账号配置错误，未执行签到）", report)
 
 
 if __name__ == "__main__":

@@ -28,11 +28,18 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: .cache/quark-signin
-          key: quark-signed-${{ steps.date.outputs.today }}
+          key: quark-signed-v2-${{ steps.date.outputs.today }}
 
       - name: 今日已完成签到
         if: steps.cache-success.outputs.cache-hit == 'true'
-        run: echo "今日已全部签到成功，跳过重复执行。"
+        run: |
+          echo "今日已全部签到成功，跳过重复执行。以下为当天已保存的账号结果。" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -f .cache/quark-signin/summary.md ]; then
+            cat .cache/quark-signin/summary.md | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "缓存中没有账号摘要。" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "Server 酱：本次未发送（命中今日成功缓存，跳过重复执行）。" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: 检出代码
         if: steps.cache-success.outputs.cache-hit != 'true'
@@ -67,7 +74,8 @@ jobs:
         env:
           COOKIE_QUARK: ${{ secrets.COOKIE_QUARK }}
           SERVER_CHAN_SEND_KEY: ${{ secrets.SERVER_CHAN_SEND_KEY }}
-        run: python checkIn_Quark.py
+          QUARK_SUMMARY_FILE: .cache/quark-signin/summary.md
+        run: python -u checkIn_Quark.py
 
       - name: 生成今日成功标记
         if: success() && steps.cache-success.outputs.cache-hit != 'true'
@@ -80,4 +88,4 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: .cache/quark-signin
-          key: quark-signed-${{ steps.date.outputs.today }}
+          key: quark-signed-v2-${{ steps.date.outputs.today }}

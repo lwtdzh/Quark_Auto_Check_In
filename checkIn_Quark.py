@@ -51,19 +51,58 @@ def push_server_chan(title: str, message: str, send_key: str | None = None) -> b
             timeout=20,
         )
         response.raise_for_status()
-        print("✅ Server酱推送成功")
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("code") != 0:
+            print("⚠️ Server酱推送失败：接口未确认发送成功")
+            return False
         return True
-    except requests.RequestException as exc:
-        print(f"⚠️ Server酱推送失败：{exc}")
+    except (requests.RequestException, ValueError) as exc:
+        # Request exceptions can contain the SendKey-bearing URL.
+        print(f"⚠️ Server酱推送失败：{type(exc).__name__}")
         return False
 
 
-def send(title: str, message: str, push: bool = True) -> None:
-    """Print a notification-compatible summary and optionally push it."""
+def write_actions_summary(title: str, message: str, notification_status: str) -> None:
+    """Publish the account results and this run's notification status."""
+
+    # Preserve line breaks, including any backticks in account names/messages.
+    fence_length = max(
+        (len(match[0]) + 1 for match in re.finditer(r"`+", message)), default=3
+    )
+    fence = "`" * max(3, fence_length)
+    account_report = f"## {title}\n\n{fence}text\n{message}\n{fence}\n\n"
+    try:
+        if summary_path := os.getenv("GITHUB_STEP_SUMMARY"):
+            with Path(summary_path).open("a", encoding="utf-8") as output:
+                output.write(account_report + notification_status + "\n\n")
+        if cache_path := os.getenv("QUARK_SUMMARY_FILE"):
+            path = Path(cache_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Cached runs display their own status instead of the earlier push status.
+            path.write_text(account_report, encoding="utf-8")
+    except OSError as exc:
+        print(f"⚠️ 无法保存签到摘要：{type(exc).__name__}")
+
+
+def send(
+    title: str,
+    message: str,
+    push: bool = True,
+    skip_reason: str = "所有账号在执行前已签到",
+) -> None:
+    """Print the summary, optionally push it, and publish an Actions summary."""
 
     print(f"{title}:\n{message}")
-    if push:
-        push_server_chan(title, message)
+    if not push:
+        notification_status = f"Server 酱：本次未发送（{skip_reason}）。"
+    elif not os.getenv(SERVER_CHAN_SEND_KEY_ENV, "").strip():
+        notification_status = "Server 酱：本次未发送（未配置 SERVER_CHAN_SEND_KEY）。"
+    elif push_server_chan(title, message):
+        notification_status = "Server 酱：本次已发送，发送成功。"
+    else:
+        notification_status = "Server 酱：本次已尝试发送，发送失败。"
+    print(notification_status)
+    write_actions_summary(title, message, notification_status)
 
 
 def load_env_file(path: str | Path = ".env") -> None:
@@ -305,7 +344,7 @@ def main(
     try:
         entries = split_account_entries(cookie_value)
     except ConfigError as exc:
-        print(f"❌ {exc}")
+        send("夸克自动签到", f"❌ {exc}", push=False, skip_reason="账号配置错误，未执行签到")
         return 2
 
     print(f"✅ 检测到共 {len(entries)} 个夸克账号\n")
