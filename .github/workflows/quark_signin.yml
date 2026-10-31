@@ -18,35 +18,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
       - name: 获取北京时间日期
         id: date
         shell: bash
         run: echo "today=$(TZ='Asia/Shanghai' date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
 
-      - name: 恢复今日成功标记
+      - name: 恢复今日各账号成功记录
         id: cache-success
         uses: actions/cache/restore@v6
         with:
-          path: .cache/quark-signin
-          key: quark-signed-v2-${{ steps.date.outputs.today }}
-
-      - name: 今日已完成签到
-        if: steps.cache-success.outputs.cache-hit == 'true'
-        run: |
-          echo "今日已全部签到成功，跳过重复执行。以下为当天已保存的账号结果。" | tee -a "$GITHUB_STEP_SUMMARY"
-          if [ -f .cache/quark-signin/summary.md ]; then
-            cat .cache/quark-signin/summary.md | tee -a "$GITHUB_STEP_SUMMARY"
-          else
-            echo "缓存中没有账号摘要。" | tee -a "$GITHUB_STEP_SUMMARY"
-          fi
-          echo "Server 酱：本次未发送（命中今日成功缓存，跳过重复执行）。" | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: 检出代码
-        if: steps.cache-success.outputs.cache-hit != 'true'
-        uses: actions/checkout@v7
+          path: .cache/quark-signin/accounts.json
+          key: quark-accounts-v1-${{ steps.date.outputs.today }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            quark-accounts-v1-${{ steps.date.outputs.today }}-
 
       - name: 随机延迟
-        if: steps.cache-success.outputs.cache-hit != 'true'
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -59,33 +48,24 @@ jobs:
           sleep "$delay"
 
       - name: 设置 Python 环境
-        if: steps.cache-success.outputs.cache-hit != 'true'
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
 
       - name: 安装依赖
-        if: steps.cache-success.outputs.cache-hit != 'true'
         run: python -m pip install --disable-pip-version-check -r requirements.txt
 
       - name: 执行签到脚本
-        if: steps.cache-success.outputs.cache-hit != 'true'
         env:
           COOKIE_QUARK: ${{ secrets.COOKIE_QUARK }}
           SERVER_CHAN_SEND_KEY: ${{ secrets.SERVER_CHAN_SEND_KEY }}
-          QUARK_SUMMARY_FILE: .cache/quark-signin/summary.md
+          QUARK_SUCCESS_CACHE: .cache/quark-signin/accounts.json
         run: python -u checkIn_Quark.py
 
-      - name: 生成今日成功标记
-        if: success() && steps.cache-success.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p .cache/quark-signin
-          echo "${{ steps.date.outputs.today }}" > .cache/quark-signin/success
-
-      - name: 保存今日成功标记
-        if: success() && steps.cache-success.outputs.cache-hit != 'true'
+      - name: 保存今日各账号成功记录
+        if: always() && hashFiles('.cache/quark-signin/accounts.json') != ''
         uses: actions/cache/save@v6
         with:
-          path: .cache/quark-signin
-          key: quark-signed-v2-${{ steps.date.outputs.today }}
+          path: .cache/quark-signin/accounts.json
+          key: ${{ steps.cache-success.outputs.cache-primary-key }}

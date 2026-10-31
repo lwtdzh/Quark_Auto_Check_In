@@ -1,8 +1,10 @@
 import io
+import json
 import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +12,7 @@ import requests
 
 from checkIn_Quark import (
     ConfigError,
+    DailySuccessCache,
     Quark,
     QuarkAPIError,
     extract_params,
@@ -351,12 +354,10 @@ class ActionsSummaryTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.summary = Path(temp.name) / "step-summary.md"
-        self.cached_summary = Path(temp.name) / "cache" / "summary.md"
         env = patch.dict(
             "os.environ",
             {
                 "GITHUB_STEP_SUMMARY": str(self.summary),
-                "QUARK_SUMMARY_FILE": str(self.cached_summary),
                 "SERVER_CHAN_SEND_KEY": "test-sendkey",
             },
             clear=True,
@@ -364,7 +365,7 @@ class ActionsSummaryTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
 
-    def test_success_summary_matches_notification_and_cache_omits_push_status(self):
+    def test_success_summary_matches_notification(self):
         class StubQuark:
             checked_in_by_this_run = True
 
@@ -390,9 +391,6 @@ class ActionsSummaryTests(unittest.TestCase):
         self.assertIn("账号二", report)
         self.assertIn("Server 酱：本次已发送，发送成功。", report)
         self.assertIn("Server 酱：本次已发送，发送成功。", output.getvalue())
-        cached = self.cached_summary.read_text(encoding="utf-8")
-        self.assertIn(account_message, cached)
-        self.assertNotIn("Server 酱：", cached)
 
     def test_all_already_signed_reports_skip_without_sending(self):
         with patch("checkIn_Quark.requests.post") as post, redirect_stdout(io.StringIO()):
@@ -474,6 +472,192 @@ class ActionsSummaryTests(unittest.TestCase):
         report = self.summary.read_text(encoding="utf-8")
         self.assertIn("未配置 COOKIE_QUARK", report)
         self.assertIn("本次未发送（账号配置错误，未执行签到）", report)
+
+
+class AccountCacheTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.cache_path = Path(temp.name) / "cache" / "accounts.json"
+        self.summary_path = Path(temp.name) / "step-summary.md"
+        env = patch.dict(
+            "os.environ",
+            {
+                "QUARK_SUCCESS_CACHE": str(self.cache_path),
+                "GITHUB_STEP_SUMMARY": str(self.summary_path),
+                "SERVER_CHAN_SEND_KEY": "test-sendkey",
+            },
+            clear=True,
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        clock = patch("checkIn_Quark.datetime")
+        self.clock = clock.start()
+        self.addCleanup(clock.stop)
+        self.clock.now.return_value = datetime(2026, 10, 31, 12)
+        self.first = "user=账号一;kps=first-secret-kps;sign=first-secret-sign;vcode=111;"
+        self.second = "user=账号二;kps=second-secret-kps;sign=second-secret-sign;vcode=222;"
+        self.third = "user=账号三;kps=third-secret-kps;sign=third-secret-sign;vcode=333;"
+
+    def run_accounts(self, raw, outcomes=None, notification_failure=False):
+        outcomes = outcomes or {}
+        seen = []
+
+        class StubQuark:
+            def __init__(self, account):
+                self.account = account
+                seen.append(account["user"])
+                self.checked_in_by_this_run = outcomes.get(account["user"]) != "already"
+
+            def do_sign(self):
+                user = self.account["user"]
+                if outcomes.get(user) == "failure":
+                    raise QuarkAPIError("凭证失效")
+                status = "今日已签到" if outcomes.get(user) == "already" else "签到成功"
+                return f"{user}\n✅ {status} +20.00 MB"
+
+        self.summary_path.write_text("", encoding="utf-8")
+        with (
+            patch(
+                "checkIn_Quark.requests.post",
+                return_value=FakeResponse({"code": 40001 if notification_failure else 0}),
+            ) as post,
+            redirect_stdout(io.StringIO()),
+        ):
+            exit_code = main(raw, quark_factory=StubQuark)
+        return exit_code, seen, post
+
+    def test_added_account_runs_while_original_accounts_are_skipped(self):
+        raw = self.first + "\n" + self.second
+        code, seen, post = self.run_accounts(raw)
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, ["账号一", "账号二"])
+        post.assert_called_once()
+
+        code, seen, post = self.run_accounts(raw + "\n" + self.third)
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, ["账号三"])
+        post.assert_called_once()
+        report = self.summary_path.read_text(encoding="utf-8")
+        message = post.call_args.kwargs["data"]["desp"]
+        for user in ("账号一", "账号二", "账号三"):
+            self.assertIn(user, report)
+            self.assertIn(user, message)
+        self.assertEqual(report.count("⏭️ 今日已确认成功"), 2)
+
+        code, seen, post = self.run_accounts(raw + "\n" + self.third)
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, [])
+        post.assert_not_called()
+        report = self.summary_path.read_text(encoding="utf-8")
+        self.assertEqual(report.count("⏭️ 今日已确认成功"), 3)
+        self.assertIn("本次未发送（所有账号均命中今日成功记录）", report)
+
+    def test_only_changed_credentials_are_rechecked(self):
+        self.run_accounts(self.first + "\n" + self.second)
+        for old, new in (
+            ("first-secret-kps", "updated-kps"),
+            ("first-secret-sign", "updated-sign"),
+            ("vcode=111", "vcode=444"),
+        ):
+            with self.subTest(credential=old):
+                # Reset the baseline so each individual credential change is checked.
+                self.cache_path.unlink()
+                self.run_accounts(self.first + "\n" + self.second)
+                code, seen, post = self.run_accounts(
+                    self.first.replace(old, new) + "\n" + self.second,
+                    outcomes={"账号一": "already"},
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(seen, ["账号一"])
+                post.assert_not_called()
+
+    def test_reordering_and_url_format_do_not_recheck_same_accounts(self):
+        self.run_accounts(self.first + "\n" + self.second)
+        url_entry = (
+            "user=账号一;url=https://example.test/other?foo=changed"
+            "&vcode=111&sign=first-secret-sign&kps=first-secret-kps;"
+        )
+        code, seen, post = self.run_accounts(self.second + " && " + url_entry)
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, [])
+        post.assert_not_called()
+        report = self.summary_path.read_text(encoding="utf-8")
+        self.assertLess(report.index("账号二"), report.index("账号一"))
+
+    def test_partial_failure_retains_success_and_retries_only_failed_account(self):
+        raw = self.first + "\n" + self.second
+        code, seen, post = self.run_accounts(raw, {"账号二": "failure"})
+        self.assertEqual(code, 1)
+        self.assertEqual(seen, ["账号一", "账号二"])
+        post.assert_called_once()
+        payload = json.loads(self.cache_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(payload["accounts"]), 1)
+
+        code, seen, post = self.run_accounts(raw)
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, ["账号二"])
+        post.assert_called_once()
+        message = post.call_args.kwargs["data"]["desp"]
+        self.assertIn("账号一", message)
+        self.assertIn("账号二", message)
+
+    def test_already_signed_accounts_are_saved_without_notification(self):
+        self.run_accounts(self.first, {"账号一": "already"})
+        self.assertTrue(self.cache_path.exists())
+        code, seen, post = self.run_accounts(self.first)
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, [])
+        post.assert_not_called()
+
+    def test_notification_failure_does_not_discard_success_records(self):
+        code, seen, post = self.run_accounts(self.first, notification_failure=True)
+        self.assertEqual(code, 0)
+        post.assert_called_once()
+        code, seen, post = self.run_accounts(self.first)
+        self.assertEqual(seen, [])
+        post.assert_not_called()
+
+    def test_removed_account_does_not_appear_in_report(self):
+        self.run_accounts(self.first + "\n" + self.second)
+        code, seen, post = self.run_accounts(self.second)
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, [])
+        self.assertNotIn("账号一", self.summary_path.read_text(encoding="utf-8"))
+
+    def test_next_beijing_date_rechecks_all_accounts(self):
+        self.run_accounts(self.first + "\n" + self.second)
+        self.clock.now.return_value = datetime(2026, 11, 1, 0)
+        code, seen, post = self.run_accounts(self.first + "\n" + self.second)
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, ["账号一", "账号二"])
+        self.assertEqual(json.loads(self.cache_path.read_text())["date"], "2026-11-01")
+        self.assertEqual(str(self.clock.now.call_args.args[0]), "Asia/Shanghai")
+
+    def test_invalid_cache_never_skips_accounts(self):
+        self.cache_path.parent.mkdir()
+        for value in ('not json', '[]', '{"version":1,"date":"2026-10-31","accounts":[]}'):
+            with self.subTest(cache=value):
+                self.cache_path.write_text(value)
+                code, seen, post = self.run_accounts(self.first)
+                self.assertEqual(code, 0)
+                self.assertEqual(seen, ["账号一"])
+
+    def test_cache_contains_no_raw_credentials_or_notification_status(self):
+        self.run_accounts(self.first)
+        saved = self.cache_path.read_text()
+        self.assertNotIn("first-secret-kps", saved)
+        self.assertNotIn("first-secret-sign", saved)
+        self.assertNotIn("vcode", saved)
+        self.assertNotIn("test-sendkey", saved)
+        self.assertNotIn("Server 酱", saved)
+        payload = json.loads(saved)
+        self.assertEqual(payload["version"], 1)
+        self.assertEqual(payload["date"], "2026-10-31")
+        key = next(iter(payload["accounts"]))
+        self.assertRegex(key, r"^[a-f0-9]{64}$")
+        cache = DailySuccessCache(str(self.cache_path))
+        self.assertIn("签到成功", cache.get(parse_account(self.first, 1)))
 
 
 if __name__ == "__main__":

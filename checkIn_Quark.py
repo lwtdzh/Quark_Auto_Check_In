@@ -10,14 +10,18 @@ and the newer captured-URL format are supported.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import random
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 from urllib.parse import unquote, urlparse
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -75,11 +79,6 @@ def write_actions_summary(title: str, message: str, notification_status: str) ->
         if summary_path := os.getenv("GITHUB_STEP_SUMMARY"):
             with Path(summary_path).open("a", encoding="utf-8") as output:
                 output.write(account_report + notification_status + "\n\n")
-        if cache_path := os.getenv("QUARK_SUMMARY_FILE"):
-            path = Path(cache_path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            # Cached runs display their own status instead of the earlier push status.
-            path.write_text(account_report, encoding="utf-8")
     except OSError as exc:
         print(f"⚠️ 无法保存签到摘要：{type(exc).__name__}")
 
@@ -329,6 +328,62 @@ class Quark:
         return "\n".join(lines)
 
 
+class DailySuccessCache:
+    """Remember successful accounts for one Beijing date, without raw credentials."""
+
+    def __init__(self, path: str | None) -> None:
+        self.path = Path(path) if path else None
+        self.today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        self.accounts: dict[str, str] = {}
+        if self.path is None:
+            return
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(payload, dict)
+                or payload.get("version") != 1
+                or payload.get("date") != self.today
+                or not isinstance(payload.get("accounts"), dict)
+            ):
+                return
+            self.accounts = {
+                key: result
+                for key, result in payload["accounts"].items()
+                if re.fullmatch(r"[a-f0-9]{64}", key) and isinstance(result, str)
+            }
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as exc:
+            print(f"⚠️ 无法读取账号成功缓存，将重新检查：{type(exc).__name__}")
+
+    @staticmethod
+    def account_key(account: dict[str, str]) -> str:
+        identity = {name: account[name] for name in (*REQUIRED_PARAMS, "user")}
+        encoded = json.dumps(identity, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def get(self, account: dict[str, str]) -> str | None:
+        return self.accounts.get(self.account_key(account))
+
+    def record(self, account: dict[str, str], result: str) -> None:
+        self.accounts[self.account_key(account)] = result
+        if self.path is None:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_name(self.path.name + ".tmp")
+            temporary.write_text(
+                json.dumps(
+                    {"version": 1, "date": self.today, "accounts": self.accounts},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            temporary.replace(self.path)
+        except OSError as exc:
+            print(f"⚠️ 无法保存账号成功缓存：{type(exc).__name__}")
+
+
 def main(
     cookie_value: str | None = None,
     quark_factory: Callable[[dict[str, str]], Quark] | None = None,
@@ -351,6 +406,8 @@ def main(
     results: list[str] = []
     failures = 0
     checked_in_by_this_run = 0
+    cached_accounts = 0
+    cache = DailySuccessCache(os.getenv("QUARK_SUCCESS_CACHE"))
 
     for index, entry in enumerate(entries, start=1):
         heading = f"🙍🏻‍♂️ 第 {index} 个账号"
@@ -358,8 +415,17 @@ def main(
         try:
             account = parse_account(entry, index)
             account_name = account["user"]
+            cached_result = cache.get(account)
+            if cached_result is not None:
+                cached_accounts += 1
+                results.append(
+                    f"{heading}\n⏭️ 今日已确认成功，跳过重复签到（以下为今日保存的结果）\n"
+                    f"{cached_result}"
+                )
+                continue
             quark = quark_factory(account)
             result = quark.do_sign()
+            cache.record(account, result)
             if getattr(quark, "checked_in_by_this_run", False):
                 checked_in_by_this_run += 1
             results.append(f"{heading}\n{result}")
@@ -377,9 +443,15 @@ def main(
         "夸克自动签到",
         summary,
         push=failures > 0 or checked_in_by_this_run > 0,
+        skip_reason=(
+            "所有账号均命中今日成功记录"
+            if cached_accounts == len(entries)
+            else "所有账号在执行前已签到"
+        ),
     )
     print(
-        f"\n----------执行完毕：成功 {len(entries) - failures}，失败 {failures}----------"
+        f"\n----------执行完毕：成功 {len(entries) - failures}，失败 {failures}，"
+        f"缓存跳过 {cached_accounts}----------"
     )
     return 1 if failures else 0
 

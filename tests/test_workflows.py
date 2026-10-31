@@ -1,7 +1,4 @@
 from pathlib import Path
-import os
-import subprocess
-import tempfile
 import unittest
 
 import yaml
@@ -19,37 +16,29 @@ class WorkflowSyntaxTests(unittest.TestCase):
                 self.assertIsInstance(parsed, dict)
                 self.assertIn("jobs", parsed)
 
-    def test_cache_hit_outputs_saved_accounts_with_current_notification_status(self):
+    def test_restored_cache_does_not_skip_reading_current_secret(self):
         parsed = yaml.safe_load((ROOT / ".github/workflows/quark_signin.yml").read_text(encoding="utf-8"))
-        step = next(s for s in parsed["jobs"]["sign-in"]["steps"] if s["name"] == "今日已完成签到")
-        for with_report in (True, False):
-            with self.subTest(with_report=with_report), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
-                summary = root / "step-summary.md"
-                if with_report:
-                    cache = root / ".cache" / "quark-signin"
-                    cache.mkdir(parents=True)
-                    (cache / "summary.md").write_text(
-                        "## 夸克自动签到\n\n```text\n账号一 ✅ 签到成功\n账号二 ✅ 今日已签到\n```\n\n",
-                        encoding="utf-8",
-                    )
-                result = subprocess.run(
-                    ["bash", "-e", "-o", "pipefail", "-c", step["run"]],
-                    cwd=root,
-                    env={**os.environ, "GITHUB_STEP_SUMMARY": str(summary)},
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                report = summary.read_text(encoding="utf-8")
-                self.assertEqual(report, result.stdout)
-                self.assertIn("本次未发送（命中今日成功缓存，跳过重复执行）", report)
-                self.assertNotIn("发送成功", report)
-                if with_report:
-                    self.assertIn("账号一", report)
-                    self.assertIn("账号二", report)
-                else:
-                    self.assertIn("缓存中没有账号摘要", report)
+        steps = parsed["jobs"]["sign-in"]["steps"]
+        restore = next(s for s in steps if s.get("id") == "cache-success")
+        checkout = next(s for s in steps if s.get("uses", "").startswith("actions/checkout@"))
+        signin = next(s for s in steps if s["name"] == "执行签到脚本")
+        save = next(s for s in steps if s.get("uses", "").startswith("actions/cache/save@"))
+        # Checkout must precede restore; its cleanup must not remove restored records.
+        self.assertLess(steps.index(checkout), steps.index(restore))
+        for step in steps[:steps.index(signin) + 1]:
+            self.assertNotIn("if", step)
+        self.assertEqual(signin["env"]["COOKIE_QUARK"], "${{ secrets.COOKIE_QUARK }}")
+        self.assertEqual(signin["env"]["QUARK_SUCCESS_CACHE"], restore["with"]["path"])
+        self.assertEqual(save["with"]["path"], restore["with"]["path"])
+        # Immutable caches need a new snapshot for each run, restored only from today.
+        self.assertIn("${{ github.run_id }}", restore["with"]["key"])
+        self.assertIn("${{ github.run_attempt }}", restore["with"]["key"])
+        self.assertEqual(
+            restore["with"]["restore-keys"].strip(),
+            "quark-accounts-v1-${{ steps.date.outputs.today }}-",
+        )
+        self.assertIn("always()", save["if"])
+        self.assertNotIn("success()", save["if"])
 
 
 if __name__ == "__main__":
