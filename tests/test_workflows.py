@@ -16,6 +16,28 @@ class WorkflowSyntaxTests(unittest.TestCase):
                 self.assertIsInstance(parsed, dict)
                 self.assertIn("jobs", parsed)
 
+    def test_ci_enables_all_scheduled_workflows_only_on_main(self):
+        workflow_dir = ROOT / ".github" / "workflows"
+        # BaseLoader preserves the GitHub Actions "on" key as a string.
+        ci = yaml.load(
+            (workflow_dir / "ci.yml").read_text(encoding="utf-8"),
+            Loader=yaml.BaseLoader,
+        )
+        enable = ci["jobs"]["enable-schedules"]
+        self.assertEqual(enable["needs"], "test")
+        self.assertEqual(enable["permissions"], {"actions": "write"})
+        self.assertEqual(ci["permissions"], {"contents": "read"})
+        self.assertEqual(
+            enable["if"],
+            "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')",
+        )
+        commands = "\n".join(step.get("run", "") for step in enable["steps"])
+        for path in workflow_dir.glob("*.yml"):
+            parsed = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+            if "schedule" in parsed["on"]:
+                with self.subTest(path=path.name):
+                    self.assertIn(f"gh workflow enable {path.name}", commands)
+
     def test_restored_cache_does_not_skip_reading_current_secret(self):
         parsed = yaml.safe_load((ROOT / ".github/workflows/quark_signin.yml").read_text(encoding="utf-8"))
         steps = parsed["jobs"]["sign-in"]["steps"]

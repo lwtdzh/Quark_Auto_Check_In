@@ -31,3 +31,22 @@ jobs:
 
       - name: 运行单元测试
         run: python -m unittest discover -s tests -v
+
+  enable-schedules:
+    name: 启用定时工作流
+    needs: test
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: 启用每日签到和每月保活
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh workflow enable quark_signin.yml
+          gh workflow enable empty-commit-keepalive.yml
+          gh api "repos/${GH_REPO}/actions/workflows" \
+            --jq '.workflows[] | "\(.name): \(.state)"'
